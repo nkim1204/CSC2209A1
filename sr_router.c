@@ -20,6 +20,21 @@
 #include "sr_router.h"
 #include "sr_protocol.h"
 
+#ifndef ICMP_ECHO_REPLY
+#define ICMP_ECHO_REPLY 0
+#endif
+
+#ifndef ICMP_ECHO_REQUEST
+#define ICMP_ECHO_REQUEST 8
+#endif
+
+struct icmp_hdr{
+	uint8_t type;
+	uint8_t code;
+	uint16_t sum;
+	uint32_t unused;
+}__attribute__((packed));
+
 /*--------------------------------------------------------------------- 
  * Method: sr_init(void)
  * Scope:  Global
@@ -66,114 +81,83 @@ void sr_handlepacket(struct sr_instance* sr,
     assert(packet);
     assert(interface);
 
+
     struct sr_rt* sr_rt = sr->routing_table;
     struct sr_if* sr_if = sr->if_list;
 
+    struct sr_ethernet_hdr *ethHdr = (struct sr_ethernet_hdr *) packet;
+    uint16_t ethType = htons(ethHdr->ether_type);
 
-    uint8_t* dest = malloc(6*sizeof(uint8_t));
-    uint8_t* src = malloc(6*sizeof(uint8_t));
-    uint8_t* ethType = malloc(2*sizeof(uint8_t));
+    if(ethType == ETHERTYPE_ARP){
+    	struct sr_arphdr * arpHdr = (struct sr_arphdr *)(packet + sizeof(struct sr_ethernet_hdr));
 
-	uint8_t* nPacket = malloc(len*sizeof(uint8_t));
-
-	memcpy(nPacket, packet, len);
-
-    memcpy(dest, packet, 6);
-    memcpy(src, packet+6, 6);
-    memcpy(ethType, packet+12, 2);
-
-    while(strcmp(sr_if->name,interface)){
-        printf("%s\n",sr_if->name);
-       	sr_if = sr_if->next;
+    	if(htons(arpHdr->ar_hrd) != ARPHDR_ETHER){
+    		printf("Invalid ARP Hardware Type. Dropping packet.\n");
+    		return;
+    	}
+    	if(htons(arpHdr->ar_pro) != ETHERTYPE_IP){
+    		printf("Invalid ARP Protocol Type. Dropping packet.\n");
+    		return;
+    	}
+    	if(htons(arpHdr->ar_op) == ARP_REQUEST){
+    		struct sr_if * target_if = destInterfaceCheck(sr, arpHdr->ar_tip);
+    		form_arp_reply_packet(ethHdr, arpHdr, target_if);
+    		sr_send_packet(sr, packet, len, interface);
+    	}
     }
-
-    if(!strcmp((unsigned char*)dest, sr_if->addr)){
-
-		switch(*ethType){
-			case 0x8:
-				/// ARP Case
-				if(*(ethType+1) == 0x6){
-					memcpy(nPacket,src,6);
-					memcpy(nPacket+6,sr_if->addr,6);
-					*(nPacket+20) = 0x00;
-					*(nPacket+21) = 0x02;
-					memcpy(nPacket+22,sr_if->addr,6);
-					*(uint32_t*)(nPacket+28) = sr_if->ip;
-	//    			printf("%X\n",sr_if->ip);
-	//    			for(int i = 0; i < 4; i++)
-	//    				printf("%X ",*(nPacket+28+i));
-	//    			printf("\n");
-					memcpy(nPacket+32,packet+22,6);
-					memcpy(nPacket+38,packet+28,4);
-
-					sr_send_packet(sr,nPacket,len,sr_if->name);
+    else if(ethType == ETHERTYPE_IP){
+    	struct ip * ip_packet = (struct ip *)(packet + sizeof(struct sr_ethernet_hdr));
+    	uint16_t checksum_rcvd = htons(ip_packet->ip_sum);
+    	ip_packet->ip_sum = 0;
+    	unsigned int ip_hdr_len = ip_packet->ip_v * ip_packet->ip_hl;
+    	uint16_t checksum_cptd = compute_checksum((uint16_t*)ip_packet, ip_hdr_len);
+    	if(checksum_rcvd != checksum_cptd){
+    		printf("IP Header Checksum is incorrect. Dropping packet.\n");
+    		return;
+    	}
+    	struct sr_if* target_if = destInterfaceCheck(sr, (ip_packet->ip_dst).s_addr);
+    	if(target_if){
+			if(ip_packet->ip_p == IPPROTO_ICMP){
+				struct icmp_hdr * icmp = (struct icmp_hdr *)(packet + sizeof(struct sr_ethernet_hdr) + ip_hdr_len);
+				if(icmp->type == ICMP_ECHO_REQUEST){
+					uint16_t sum_rcvd = htons(icmp->sum);
+					icmp->sum = 0;
+					uint16_t sum_cptd = compute_checksum((uint16_t *)icmp, ntohs(ip_packet->ip_len) - ip_hdr_len);
+					if(sum_rcvd != sum_cptd){
+						printf("ICMP Checksum is incorrect. Dropping packet.\n");
+						return;
+					}
+					form_icmp_reply_packet(packet);
+					sr_send_packet(sr, packet, len, interface);
 				}
-				/// Standard IPv4 Case
-				else if(*(ethType+1) == 0x0){
-
-					while(strcmp(sr_if->name,interface)){
-						printf("%s\n",sr_if->name);
-						sr_if = sr_if->next;
-					}
-					memcpy(nPacket,src,6);
-					memcpy(nPacket+6,sr_if->addr,6);
-
-					/// ICMP Protocol Case
-					if(*(packet+0x17) == 0x1){
-						*(uint32_t*)(nPacket+0x1a) = sr_if->ip;
-	//    				printf("%X\n",sr_if->ip);
-	//    				for(int i = 0; i < 4; i++)
-	//    					printf("%X ",*(nPacket+0x1a+i));
-	//    				printf("\n");
-						memcpy(nPacket+0x1e,packet+0x1a,4);
-						*(nPacket+0x22) = 0x0;
-					}
-
-					/// UDP Protocol Case
-					if(*(packet+0x17) == 0x11){
-						printf("DO SOMETHING");
-					}
-
-					int hLen = (*(packet+0x0e) >> 4) * (*(packet+0x0e) & 0x0F);
-					*(nPacket+0x18) = 0;
-					*(nPacket+0x19) = 0;
-					uint16_t checksum = compute_checksum(nPacket+0x0e,hLen);
-					*(nPacket+0x18) = (checksum & 0xFF00) >> 8;
-					*(nPacket+0x19) = checksum & 0x00FF;
-
-					*(nPacket+0x24) = 0;
-					*(nPacket+0x25) = 0;
-					checksum = compute_checksum(nPacket+0x22,len-14-hLen);
-					*(nPacket+0x24) = (checksum & 0xFF00) >> 8;
-					*(nPacket+0x25) = checksum & 0x00FF;
-					sr_send_packet(sr,nPacket,len,sr_if->name);
-				}
-				break;
-			default:
-				break;
-		}
+			}
+    	}
     }
-
-//    for(int i = 0; i < len; i++)
-//    	printf("%X ",*(nPacket+i));
-//    printf("\n");
 
     printf("*** -> Received packet of length %d\n",len);
 
 }/* end sr_ForwardPacket */
 
+void print_packet(uint8_t * packet, int length){
+	for(int i = 0; i < length; i++){
+		printf("%X ",*(packet+i));
+	}
+	printf("\n");
+}
 
 /*--------------------------------------------------------------------- 
  * Method:
  *
  *---------------------------------------------------------------------*/
 
-uint16_t compute_checksum(uint8_t* header, int length){
+uint16_t compute_checksum(uint16_t* header, unsigned int length){
 	uint32_t sum = 0;
 
+
 	while(length > 1){
-//		printf("ADDING: %X\n",htons(*((uint16_t*) header)));
-		sum = sum + htons(*((uint16_t*) header)++);
+//		printf("ADDING: %X\n",htons(*temp));
+		sum = sum + htons(*header);
+		header++;
 //		printf("AFTER: %X\n",sum);
 		length = length - 2;
 	}
@@ -187,5 +171,51 @@ uint16_t compute_checksum(uint8_t* header, int length){
 	}
 //	printf("CHECMSUM: %X\n",(uint16_t)~sum);
 	return (uint16_t)(~sum);
+}
+
+struct sr_if * destInterfaceCheck(struct sr_instance *sr, uint32_t target_ip){
+	assert(sr);
+	struct sr_if * curr_if = sr->if_list;
+	assert(curr_if);
+	while(curr_if && curr_if->ip != target_ip){
+		curr_if = curr_if->next;
+	}
+	return curr_if;
+}
+
+void form_arp_reply_packet(struct sr_ethernet_hdr * ethHdr, struct sr_arphdr * arpHdr, struct sr_if * interface){
+	assert(ethHdr); assert(arpHdr); assert(interface);
+	memcpy(ethHdr->ether_dhost, ethHdr->ether_shost, ETHER_ADDR_LEN);
+	memcpy(ethHdr->ether_shost, interface->addr, ETHER_ADDR_LEN);
+	memcpy(arpHdr->ar_tha, arpHdr->ar_sha, ETHER_ADDR_LEN);
+	memcpy(arpHdr->ar_sha, interface->addr, ETHER_ADDR_LEN);
+	arpHdr->ar_tip = arpHdr->ar_sip;
+	arpHdr->ar_sip = interface->ip;
+	arpHdr->ar_op = htons(ARP_REPLY);
+}
+
+void form_icmp_reply_packet(uint8_t* packet){
+	struct sr_ethernet_hdr* ethHdr = (struct sr_ethernet_hdr*)packet;
+	struct ip* ip_packet = (struct ip*)(packet + sizeof(struct sr_ethernet_hdr));
+
+	unsigned int ip_hdr_len = ip_packet->ip_v * ip_packet->ip_hl;
+
+	struct icmp_hdr * icmp = (struct icmp_hdr *)(packet + sizeof(struct sr_ethernet_hdr) + ip_hdr_len);
+
+	icmp->sum = 0;
+	icmp->type = 0;
+	icmp->sum = htons(compute_checksum((uint16_t*)icmp, ntohs(ip_packet->ip_len) - ip_hdr_len));
+
+	struct in_addr temp = ip_packet->ip_src;
+	ip_packet->ip_src = ip_packet->ip_dst;
+	ip_packet->ip_dst = temp;
+	ip_packet->ip_sum = 0;
+	ip_packet->ip_sum = htons(compute_checksum((uint16_t*)ip_packet, ip_hdr_len));
+
+	uint8_t temp2[ETHER_ADDR_LEN];
+
+	memcpy(temp2, ethHdr->ether_shost, ETHER_ADDR_LEN);
+	memcpy(ethHdr->ether_shost, ethHdr->ether_dhost, ETHER_ADDR_LEN);
+	memcpy(ethHdr->ether_dhost, temp2, ETHER_ADDR_LEN);
 }
 
