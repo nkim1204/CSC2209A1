@@ -72,10 +72,4 @@ void sr_set_ether_ip(struct sr_instance* , uint32_t );
 void sr_set_ether_addr(struct sr_instance* , const unsigned char* );
 void sr_print_if_list(struct sr_instance* );
 
-uint16_t compute_checksum(uint16_t* header, unsigned int length);
-struct sr_if * destInterfaceCheck(struct sr_instance *sr, uint32_t target_ip);
-void form_arp_reply_packet(struct sr_ethernet_hdr * ethHdr, struct sr_arphdr * arpHdr, struct sr_if * interface);
-void form_icmp_reply_packet(uint8_t* packet);
-
-
 #endif /* SR_ROUTER_H */
