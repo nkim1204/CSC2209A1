@@ -152,11 +152,11 @@ void sr_init(struct sr_instance* sr)
     assert(sr);
 
     /* Add initialization code here! */
-    arpRQ = malloc(sizeof(struct arp_request_queue));
+    arpRQ = (struct arp_request_queue*)malloc(sizeof(struct arp_request_queue));
     arpRQ->first = 0;
     arpRQ->last = 0;
 
-    arpCQ = malloc(sizeof(struct arp_cache_queue));
+    arpCQ = (struct arp_cache_queue*)malloc(sizeof(struct arp_cache_queue));
     arpCQ->first = 0;
     arpCQ->last = 0;
 
@@ -216,7 +216,7 @@ uint16_t compute_checksum(uint16_t* header, unsigned int length){
 }
 
 struct packet* addPacket(struct packet_queue* pq, uint8_t* packet, uint16_t size, struct sr_if* rcvd_if){
-	struct packet* tbaPacket = malloc(sizeof(struct packet));
+	struct packet* tbaPacket = (struct packet*)malloc(sizeof(struct packet));
 	tbaPacket->next = 0;
 	tbaPacket->packet = (struct uint8_t*)malloc(size);
 	memcpy(tbaPacket->packet, packet, size);
@@ -253,7 +253,7 @@ struct arp_request* addArpRequest(uint8_t* packet, uint16_t size, uint32_t ip, s
 		curr->num += 1;
 	}
 	else{
-		curr = malloc(sizeof(struct arp_request));
+		curr = (struct arp_request*)malloc(sizeof(struct arp_request));
 		curr->interface = interface;
 		curr->ip = ip;
 		curr->next = 0;
@@ -474,7 +474,7 @@ struct arp_cache* addArpCache(unsigned char* addr, uint32_t ip){
 	time_t t;
 
 	if(!curr){
-		curr = malloc(sizeof(struct arp_cache));
+		curr = (struct arp_cache*)malloc(sizeof(struct arp_cache));
 		memcpy(curr->addr, addr, ETHER_ADDR_LEN);
 		curr->ip = ip;
 		curr->next = 0;
@@ -574,7 +574,7 @@ void cleanArpCache(){
 			count++;
 		}
 		curr = curr->next;
-
+		printf("%p\n",temp);
 		if(temp){
 			free(temp);
 			temp = 0;
@@ -666,9 +666,9 @@ void sr_handlepacket(struct sr_instance* sr,
     assert(interface);
 
     printf("*** -> Received packet of length %d\n",len);
-
     cleanArpRequest(sr);
     cleanArpCache();
+
 
 
     struct sr_ethernet_hdr *ethHdr = (struct sr_ethernet_hdr *) packet;
@@ -726,30 +726,32 @@ void sr_handlepacket(struct sr_instance* sr,
     	/*
     	 * Case when received a packet that has exceeded time.
     	 */
-    	if((ip_packet->ip_ttl -= 1) == 0){
+    	if((ip_packet->ip_ttl - 1) == 0){
     		if (ip_packet->ip_p == IPPROTO_ICMP) {
     			struct icmp_hdr *icmp = (struct icmp_hdr*) (packet + sizeof(struct sr_ethernet_hdr) + ip_hdr_len);
     			if (icmp->type == ICMP_DEST_UNREACH || icmp->type == ICMP_TIME_EXCEEDED)
     				return;
     		}
-    		unsigned int total_length; uint8_t *err_packet; struct sr_ethernet_hdr *ether_hdr;
-    		struct ip *ip_hdr; struct icmp_hdr *icmp_hdr;
-    		ip_packet->ip_ttl += 1;
-    		total_length = init_icmp_err(&err_packet, ip_packet, ip_hdr_len, &ether_hdr, &ip_hdr, &icmp_hdr);
+    		if(!target_if){
+				unsigned int total_length; uint8_t *err_packet; struct sr_ethernet_hdr *ether_hdr;
+				struct ip *ip_hdr; struct icmp_hdr *icmp_hdr;
 
-    		struct sr_if* src_if = sr_get_interface(sr, interface);
+				total_length = init_icmp_err(&err_packet, ip_packet, ip_hdr_len, &ether_hdr, &ip_hdr, &icmp_hdr);
 
-    		init_icmp_ethernet_hdr(ether_hdr, src_if->addr, ethHdr->ether_shost);
-    		init_icmp_ip_hdr(ip_hdr, ip_hdr_len, src_if->ip, (ip_packet->ip_src).s_addr);
-    		init_icmp_icmp_hdr_data(icmp_hdr, ICMP_TIME_EXCEEDED, 0, ip_packet, ip_hdr_len + ICMP_DATA_LEN);
-//    		for(int i = 0; i < total_length; i++)
-//    			printf("%X ",*(err_packet+i));
-//    		printf("\n");
-    		fprintf(stderr,"TIME EXCEEDED PACKET ARRIVED. SENDING ICMP PACKET TO THE SENDER.\n");
-    		sr_send_packet(sr,err_packet,total_length,interface);
-    		free(err_packet);
-    		err_packet = 0;
-    		return;
+				struct sr_if* src_if = sr_get_interface(sr, interface);
+
+				init_icmp_ethernet_hdr(ether_hdr, src_if->addr, ethHdr->ether_shost);
+				init_icmp_ip_hdr(ip_hdr, ip_hdr_len, src_if->ip, (ip_packet->ip_src).s_addr);
+				init_icmp_icmp_hdr_data(icmp_hdr, ICMP_TIME_EXCEEDED, 0, ip_packet, ip_hdr_len + ICMP_DATA_LEN);
+	//    		for(int i = 0; i < total_length; i++)
+	//    			printf("%X ",*(err_packet+i));
+	//    		printf("\n");
+				fprintf(stderr,"TIME EXCEEDED PACKET ARRIVED. SENDING ICMP PACKET TO THE SENDER.\n");
+				sr_send_packet(sr,err_packet,total_length,interface);
+				free(err_packet);
+				err_packet = 0;
+				return;
+    		}
     	}
     	/*
     	 * Case when the destination is one of the interfaces.
@@ -780,7 +782,6 @@ void sr_handlepacket(struct sr_instance* sr,
 			else if(ip_packet->ip_p == TCP || ip_packet->ip_p == UDP){
 				unsigned int total_length; uint8_t *err_packet; struct sr_ethernet_hdr *ether_hdr;
 				struct ip *ip_hdr; struct icmp_hdr *icmp_hdr;
-				ip_packet->ip_ttl += 1;
 				total_length = init_icmp_err(&err_packet, ip_packet, ip_hdr_len, &ether_hdr, &ip_hdr, &icmp_hdr);
 				struct sr_if* src_if = sr_get_interface(sr, interface);
 				init_icmp_ethernet_hdr(ether_hdr, src_if->addr, ethHdr->ether_shost);
