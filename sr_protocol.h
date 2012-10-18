@@ -71,7 +71,7 @@
 #endif
 #ifdef _DARWIN_
 #ifndef __BYTE_ORDER
-#define __BYTE_ORDER __BIG_ENDIAN
+#define __BYTE_ORDER __LITTLE_ENDIAN
 #endif
 #endif
 

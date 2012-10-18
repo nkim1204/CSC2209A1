@@ -1,1 +1,1 @@
-./sr -t 1082 -s vns-1.stanford.edu -u c1kimsun
+./sr -t 1082 -s vns-1.stanford.edu -u c1kimsun -l log1.txt

@@ -51,16 +51,16 @@
 #define ICMP_ECHO_REPLY 0
 #endif
 
-#ifndef ICMP_ECHO_REPLY
-#define ICMP_ECHO_REPLY 0
-#endif
-
 #ifndef ICMP_ECHO_REQUEST
 #define ICMP_ECHO_REQUEST 8
 #endif
 
 #ifndef ICMP_DEST_UNREACH
 #define ICMP_DEST_UNREACH 3
+#endif
+
+#ifndef ICMP_HOST_UNREACH
+#define ICMP_HOST_UNREACH 1
 #endif
 
 #ifndef ICMP_PORT_UNREACH
@@ -79,6 +79,14 @@
 #define ICMP_DATA_LEN 8
 #endif
 
+#ifndef ARP_CACHE_TIMEOUT
+#define ARP_CACHE_TIMEOUT 15
+#endif
+
+#ifndef ARP_REQUEST_MAXIMUM
+#define ARP_REQUEST_MAXIMUM 5
+#endif
+
 struct icmp_hdr{
 	uint8_t type;
 	uint8_t code;
@@ -90,6 +98,7 @@ struct packet{
 	uint8_t* packet;
 	struct packet* next;
 	uint16_t size;
+	struct sr_if* rcvd_if;
 };
 
 struct packet_queue{
@@ -104,7 +113,7 @@ struct arp_request{
 	struct packet_queue* packetQueue;
 	struct sr_if* interface;
 	uint8_t num;
-//	time_t
+	time_t timestamp;
 };
 
 struct arp_request_queue{
@@ -117,6 +126,7 @@ struct arp_cache{
 	unsigned char addr[ETHER_ADDR_LEN];
 	struct arp_cache* prev;
 	struct arp_cache* next;
+	time_t timestamp;
 };
 
 struct arp_cache_queue{
@@ -152,6 +162,39 @@ void sr_init(struct sr_instance* sr)
 
 } /* -- sr_init -- */
 
+void print_packet(uint8_t * packet, int length){
+	for(int i = 0; i < length; i++){
+		printf("%X ",*(packet+i));
+	}
+	printf("\n");
+}
+
+void print_ip(uint32_t ip){
+	unsigned char octet[4]  = {0,0,0,0};
+	for (int i=0; i<4; i++)
+	{
+		octet[i] = ( ip >> (i*8) ) & 0xFF;
+	}
+	printf("IP: %d.%d.%d.%d\n",octet[0],octet[1],octet[2],octet[3]);
+}
+
+void print_mac(unsigned char* addr){
+	printf("MAC ADDRESS: ");
+	for(int i = 0; i < 6; i++){
+		if(i == 5){
+			if((uint8_t)addr[i] < 16)
+				printf("0%X\n",addr[i]);
+			else
+				printf("%X\n",addr[i]);
+			return;
+		}
+		if((uint8_t)addr[i] < 16)
+			printf("0%X:",addr[i]);
+		else
+			printf("%X:",addr[i]);
+	}
+}
+
 uint16_t compute_checksum(uint16_t* header, unsigned int length){
 	uint32_t sum = 0;
 
@@ -172,12 +215,13 @@ uint16_t compute_checksum(uint16_t* header, unsigned int length){
 	return (uint16_t)(~sum);
 }
 
-struct packet* addPacket(struct packet_queue* pq, uint8_t* packet, uint16_t size){
+struct packet* addPacket(struct packet_queue* pq, uint8_t* packet, uint16_t size, struct sr_if* rcvd_if){
 	struct packet* tbaPacket = malloc(sizeof(struct packet));
 	tbaPacket->next = 0;
 	tbaPacket->packet = (struct uint8_t*)malloc(size);
 	memcpy(tbaPacket->packet, packet, size);
 	tbaPacket->size = size;
+	tbaPacket->rcvd_if = rcvd_if;
 	if(pq->first){
 		pq->last->next = tbaPacket;
 	}
@@ -201,11 +245,11 @@ struct arp_request* checkArpRequestQueue(uint32_t ip){
 	return 0;
 }
 
-struct arp_request* addArpRequest(uint8_t* packet, uint16_t size, uint32_t ip, struct sr_if* interface){
+struct arp_request* addArpRequest(uint8_t* packet, uint16_t size, uint32_t ip, struct sr_if* interface, struct sr_if* rcvd_if){
 	struct arp_request* curr = checkArpRequestQueue(ip);
 	if(curr){
 		struct packet_queue* pq = curr->packetQueue;
-		addPacket(pq, packet, size);
+		addPacket(pq, packet, size, rcvd_if);
 		curr->num += 1;
 	}
 	else{
@@ -215,7 +259,7 @@ struct arp_request* addArpRequest(uint8_t* packet, uint16_t size, uint32_t ip, s
 		curr->next = 0;
 		curr->packetQueue = (struct packet_queue*)malloc(sizeof(struct packet_queue));
 		curr->packetQueue->first = curr->packetQueue->last = 0;
-		addPacket(curr->packetQueue, packet, size);
+		addPacket(curr->packetQueue, packet, size, rcvd_if);
 		curr->num = 1;
 		if(arpRQ->first){
 			arpRQ->last->next = curr;
@@ -228,7 +272,7 @@ struct arp_request* addArpRequest(uint8_t* packet, uint16_t size, uint32_t ip, s
 		}
 		arpRQ->last = curr;
 	}
-	printf("COUNT IS: %d\n",curr->num);
+	printf("THE NUMBER OF ARP REQUEST PACKETS IS: %d\n",curr->num);
 	return curr;
 }
 
@@ -265,10 +309,6 @@ void sendArpWaitPackets(struct sr_instance* sr, struct arp_request* arpRequest, 
 	free(arpRequest);
 	arpRequest = 0;
 }
-
-
-
-
 
 
 struct sr_if * destInterfaceCheck(struct sr_instance *sr, uint32_t target_ip){
@@ -431,6 +471,8 @@ struct arp_cache* checkArpCacheQueue(uint32_t ip){
 
 struct arp_cache* addArpCache(unsigned char* addr, uint32_t ip){
 	struct arp_cache* curr = checkArpCacheQueue(ip);
+	time_t t;
+
 	if(!curr){
 		curr = malloc(sizeof(struct arp_cache));
 		memcpy(curr->addr, addr, ETHER_ADDR_LEN);
@@ -445,28 +487,154 @@ struct arp_cache* addArpCache(unsigned char* addr, uint32_t ip){
 			arpCQ->first = curr;
 			curr->prev = curr->next = 0;
 		}
+		printf("\n*******************************\n");
+		printf("ADDED ARP CACHE\n");
+		print_ip(ip);
+		print_mac(addr);
+		printf("*******************************\n");
 		arpCQ->last = curr;
 	}
 	else{
 		curr->ip = ip;
 		memcpy(curr->addr, addr, ETHER_ADDR_LEN);
 	}
+
+	curr->timestamp = time(&t);
 	return curr;
+}
+
+void sendArpWaitPacketsICMP(struct sr_instace* sr, struct arp_request* arpReq){
+	unsigned int total_length; uint8_t *err_packet; struct sr_ethernet_hdr *ether_hdr;
+	struct ip *ip_hdr; struct icmp_hdr *icmp_hdr;
+	struct packet_queue* pq = arpReq->packetQueue;
+	struct packet* curr = pq->first;
+	struct packet* temp;
+	while(curr){
+		struct sr_ethernet_hdr* ethHdr = (struct sr_ethernet_hdr*)(curr->packet);
+		struct ip* ip_packet = (struct ip*)(curr->packet + sizeof(struct sr_ethernet_hdr));
+		unsigned int ip_hdr_len = ip_packet->ip_hl * ip_packet->ip_v;
+
+		if(ip_packet->ip_p == IPPROTO_ICMP){
+			struct icmp_hdr* icmp = (struct icmp_hdr*)(curr->packet + sizeof(struct sr_ethernet_hdr) + ip_hdr_len);
+			if(icmp->type == ICMP_DEST_UNREACH || icmp->type == ICMP_TIME_EXCEEDED){
+				return;
+			}
+		}
+		struct sr_if* src_if = curr->rcvd_if;
+		total_length = init_icmp_err(&err_packet, ip_packet, ip_hdr_len, &ether_hdr, &ip_hdr, &icmp_hdr);
+		init_icmp_ethernet_hdr(ether_hdr, src_if->addr, ethHdr->ether_shost);
+		init_icmp_ip_hdr(ip_hdr, ip_hdr_len, src_if->ip, (ip_packet->ip_src).s_addr);
+		init_icmp_icmp_hdr_data(icmp_hdr, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, ip_packet, ip_hdr_len + ICMP_DATA_LEN);
+	//    		for(int i = 0; i < total_length; i++)
+	//    			printf("%X ",*(err_packet+i));
+	//    		printf("\n");
+		printf("\n*******************************\n");
+		printf("SENT ICMP HOST UNREACHABLE PACKET TO\n");
+		print_ip((ip_packet->ip_src).s_addr);
+		printf("*******************************\n");
+		if(sr_send_packet(sr,err_packet,total_length,src_if)){
+			fprintf(stderr,"FAILED TO SEND ICMP PACKET.\n");
+		}
+//		print_packet(err_packet,total_length);
+		free(err_packet);
+		err_packet = 0;
+		temp = curr;
+		curr = curr->next;
+		free(temp);
+		temp = 0;
+	}
+	free(pq);
+	pq = 0;
+}
+
+
+void cleanArpCache(){
+	struct arp_cache* curr = arpCQ->first;
+	struct arp_cache* temp;
+	int count = 0;
+	time_t now;
+
+	while(curr){
+		time(&now);
+
+		if(difftime(now, (curr->timestamp)) >= ARP_CACHE_TIMEOUT){
+			if(curr->prev){
+				curr->prev->next = curr->next;
+			}
+			else{
+				arpCQ->first = curr->next;
+			}
+			if(curr->next){
+				curr->next->prev = curr->prev;
+			}
+			else{
+				arpCQ->last = curr->prev;
+			}
+			temp = curr;
+			count++;
+		}
+		curr = curr->next;
+
+		if(temp){
+			free(temp);
+			temp = 0;
+		}
+
+	}
+	if(count > 0){
+		printf("\n*******************************\n");
+		printf("CLEANED %d ARP CACHES\n",count);
+		printf("*******************************\n");
+	}
+}
+
+void cleanArpRequest(struct sr_instance* sr){
+	struct arp_request* curr = arpRQ->first;
+	struct arp_request* temp;
+	int count = 0;
+	time_t now;
+
+	while(curr){
+
+		time(&now);
+
+		if(difftime(now, (curr->timestamp)) >= 1){
+			if(curr->num >= ARP_REQUEST_MAXIMUM){
+				sendArpWaitPacketsICMP(sr, curr);
+				if(curr->prev){
+					curr->prev->next = curr->next;
+				}
+				else{
+					arpRQ->first = curr->next;
+				}
+				if(curr->next){
+					curr->next->prev = curr->prev;
+				}
+				else{
+					arpRQ->last = curr->prev;
+				}
+				temp = curr;
+				count++;
+			}
+		}
+		curr = curr->next;
+		if(temp){
+			free(temp);
+			temp = 0;
+		}
+	}
 }
 
 void handle_arp_reply_packet(struct sr_instanc* sr, struct sr_ethernet_hdr* ethHdr, struct sr_arphdr* arpHdr){
 	unsigned char* target_addr = arpHdr->ar_sha;
 	uint32_t target_ip = arpHdr->ar_sip;
-	struct arp_request* arpReq;
 
-	struct arp_cache* arpCache;
-
-	if(!(arpCache = checkArpCacheQueue(target_ip))){
+	struct sr_if* target_if;
+	if(!(target_if = destInterfaceCheck(sr, target_ip))){
 		addArpCache(target_addr,target_ip);
-	}
-
-	if(arpReq = checkArpRequestQueue(target_ip)){
-		sendArpWaitPackets(sr,arpReq,target_addr);
+		struct arp_request* arpReq;
+		if(arpReq = checkArpRequestQueue(target_ip))
+			sendArpWaitPackets(sr,arpReq,target_addr);
 	}
 }
 
@@ -497,8 +665,11 @@ void sr_handlepacket(struct sr_instance* sr,
     assert(packet);
     assert(interface);
 
-
     printf("*** -> Received packet of length %d\n",len);
+
+    cleanArpRequest(sr);
+    cleanArpCache();
+
 
     struct sr_ethernet_hdr *ethHdr = (struct sr_ethernet_hdr *) packet;
     uint16_t ethType = ntohs(ethHdr->ether_type);
@@ -525,9 +696,12 @@ void sr_handlepacket(struct sr_instance* sr,
     	}
     	if(ntohs(arpHdr->ar_op) == ARP_REQUEST){
     		struct sr_if * target_if = destInterfaceCheck(sr, arpHdr->ar_tip);
-    		form_arp_reply_packet(ethHdr, arpHdr, target_if);
-//    		print_packet(packet,len);
-    		sr_send_packet(sr, packet, len, interface);
+    		if(target_if){
+    			addArpCache(arpHdr->ar_sha, arpHdr->ar_sip);
+    			form_arp_reply_packet(ethHdr, arpHdr, target_if);
+//    			print_packet(packet,len);
+    			sr_send_packet(sr, packet, len, interface);}
+
     	}
     	if(ntohs(arpHdr->ar_op) == ARP_REPLY){
     		handle_arp_reply_packet(sr, ethHdr, arpHdr);
@@ -623,7 +797,7 @@ void sr_handlepacket(struct sr_instance* sr,
     	 * Otherwise, forward the packet by looking up in the routing table.
     	 */
 		else{
-
+			struct sr_if* rcvd_if = sr_get_interface(sr, interface);
 			uint32_t dst_ip = (ip_packet->ip_dst).s_addr;
 		    struct sr_rt *nexthop_rt = search_rt(sr, (uint8_t*) &dst_ip);
 		    uint32_t nexthop_ip = (nexthop_rt->gw).s_addr;
@@ -635,6 +809,7 @@ void sr_handlepacket(struct sr_instance* sr,
 		    struct arp_cache* arpCache;
 
 		    if(arpCache = checkArpCacheQueue(nexthop_ip)){
+		    	addArpCache(arpCache->addr,nexthop_ip);
 		    	memcpy(ethHdr->ether_dhost,arpCache->addr,ETHER_ADDR_LEN);
 		    	memcpy(ethHdr->ether_shost,nIf->addr,ETHER_ADDR_LEN);
 		    	ip_packet->ip_ttl -= 1;
@@ -644,7 +819,7 @@ void sr_handlepacket(struct sr_instance* sr,
 		    }
 		    else{
 		    	if(arpReq = checkArpRequestQueue(nexthop_ip)){
-					addArpRequest(packet, len, nexthop_ip, nIf);
+					addArpRequest(packet, len, nexthop_ip, nIf, rcvd_if);
 				}
 				else{
 					unsigned int nSize = sizeof(struct sr_ethernet_hdr)+sizeof(struct sr_arphdr);
@@ -652,7 +827,7 @@ void sr_handlepacket(struct sr_instance* sr,
 					form_arp_request_packet((struct sr_ethernet_hdr*)reqPacket, (struct sr_arphdr*)(reqPacket+sizeof(struct sr_ethernet_hdr)), nIf,nexthop_ip);
 
 					sr_send_packet(sr,reqPacket, nSize, nIf->name);
-					addArpRequest(packet, len, nexthop_ip, nIf);
+					addArpRequest(packet, len, nexthop_ip, nIf, rcvd_if);
 				}
 		    }
 
@@ -661,13 +836,6 @@ void sr_handlepacket(struct sr_instance* sr,
     }
 
 }/* end sr_ForwardPacket */
-
-void print_packet(uint8_t * packet, int length){
-	for(int i = 0; i < length; i++){
-		printf("%X ",*(packet+i));
-	}
-	printf("\n");
-}
 
 /*---------------------------------------------------------------------
  * Method:
