@@ -179,7 +179,7 @@ void print_ip(uint32_t ip){
 }
 
 void print_mac(unsigned char* addr){
-	printf("MAC ADDRESS: ");
+	printf("MAC: ");
 	for(int i = 0; i < 6; i++){
 		if(i == 5){
 			if((uint8_t)addr[i] < 16)
@@ -272,7 +272,12 @@ struct arp_request* addArpRequest(uint8_t* packet, uint16_t size, uint32_t ip, s
 		}
 		arpRQ->last = curr;
 	}
+	printf("\n*******************************\n");
+	printf("ADDED ARP REQUEST FOR ");
+	print_ip(ip);
 	printf("THE NUMBER OF ARP REQUEST PACKETS IS: %d\n",curr->num);
+	printf("*******************************\n");
+
 	return curr;
 }
 
@@ -367,6 +372,7 @@ void form_icmp_reply_packet(uint8_t* packet){
 	struct in_addr temp = ip_packet->ip_src;
 	ip_packet->ip_src = ip_packet->ip_dst;
 	ip_packet->ip_dst = temp;
+	ip_packet->ip_ttl = TTL;
 	ip_packet->ip_sum = 0;
 	ip_packet->ip_sum = htons(compute_checksum((uint16_t*)ip_packet, ip_hdr_len));
 
@@ -550,7 +556,7 @@ void sendArpWaitPacketsICMP(struct sr_instace* sr, struct arp_request* arpReq){
 
 void cleanArpCache(){
 	struct arp_cache* curr = arpCQ->first;
-	struct arp_cache* temp;
+	struct arp_cache* temp = 0;
 	int count = 0;
 	time_t now;
 
@@ -574,12 +580,15 @@ void cleanArpCache(){
 			count++;
 		}
 		curr = curr->next;
-		printf("%p\n",temp);
 		if(temp){
+			printf("\n*******************************\n");
+			printf("REMOVED ARP CACHE FOR\n");
+			print_ip(temp->ip);
+			print_mac(temp->addr);
+			printf("*******************************\n");
 			free(temp);
 			temp = 0;
 		}
-
 	}
 	if(count > 0){
 		printf("\n*******************************\n");
@@ -590,7 +599,7 @@ void cleanArpCache(){
 
 void cleanArpRequest(struct sr_instance* sr){
 	struct arp_request* curr = arpRQ->first;
-	struct arp_request* temp;
+	struct arp_request* temp = 0;
 	int count = 0;
 	time_t now;
 
@@ -619,6 +628,10 @@ void cleanArpRequest(struct sr_instance* sr){
 		}
 		curr = curr->next;
 		if(temp){
+			printf("\n*******************************\n");
+			printf("CLEANED %d ARP REQUESTS FOR\n",temp->num);
+			print_ip(temp->ip);
+			printf("*******************************\n");
 			free(temp);
 			temp = 0;
 		}
@@ -666,8 +679,10 @@ void sr_handlepacket(struct sr_instance* sr,
     assert(interface);
 
     printf("*** -> Received packet of length %d\n",len);
+
     cleanArpRequest(sr);
     cleanArpCache();
+
 
 
 
@@ -743,9 +758,7 @@ void sr_handlepacket(struct sr_instance* sr,
 				init_icmp_ethernet_hdr(ether_hdr, src_if->addr, ethHdr->ether_shost);
 				init_icmp_ip_hdr(ip_hdr, ip_hdr_len, src_if->ip, (ip_packet->ip_src).s_addr);
 				init_icmp_icmp_hdr_data(icmp_hdr, ICMP_TIME_EXCEEDED, 0, ip_packet, ip_hdr_len + ICMP_DATA_LEN);
-	//    		for(int i = 0; i < total_length; i++)
-	//    			printf("%X ",*(err_packet+i));
-	//    		printf("\n");
+
 				fprintf(stderr,"TIME EXCEEDED PACKET ARRIVED. SENDING ICMP PACKET TO THE SENDER.\n");
 				sr_send_packet(sr,err_packet,total_length,interface);
 				free(err_packet);
@@ -819,17 +832,11 @@ void sr_handlepacket(struct sr_instance* sr,
 		    	sr_send_packet(sr,packet,len,nIf->name);
 		    }
 		    else{
-		    	if(arpReq = checkArpRequestQueue(nexthop_ip)){
-					addArpRequest(packet, len, nexthop_ip, nIf, rcvd_if);
-				}
-				else{
-					unsigned int nSize = sizeof(struct sr_ethernet_hdr)+sizeof(struct sr_arphdr);
-					uint8_t* reqPacket = (uint8_t*)malloc(nSize);
-					form_arp_request_packet((struct sr_ethernet_hdr*)reqPacket, (struct sr_arphdr*)(reqPacket+sizeof(struct sr_ethernet_hdr)), nIf,nexthop_ip);
-
-					sr_send_packet(sr,reqPacket, nSize, nIf->name);
-					addArpRequest(packet, len, nexthop_ip, nIf, rcvd_if);
-				}
+		    	unsigned int nSize = sizeof(struct sr_ethernet_hdr)+sizeof(struct sr_arphdr);
+				uint8_t* reqPacket = (uint8_t*)malloc(nSize);
+				form_arp_request_packet((struct sr_ethernet_hdr*)reqPacket, (struct sr_arphdr*)(reqPacket+sizeof(struct sr_ethernet_hdr)), nIf,nexthop_ip);
+				sr_send_packet(sr,reqPacket, nSize, nIf->name);
+				addArpRequest(packet, len, nexthop_ip, nIf, rcvd_if);
 		    }
 
 		}
